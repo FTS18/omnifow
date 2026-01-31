@@ -118,95 +118,91 @@ export function AdminDashboard({ viewingOrgId }: { viewingOrgId?: string }) {
 
   const isAdmin = userData?.role === 'college_admin' || userData?.role === 'super_admin';
 
-useEffect(() => {
-  const unsubscribe = onAuthStateChanged(auth, async (user) => {
-    if (!user) {
-      navigate('/auth');
-      return;
-    }
-
-    try {
-      const userDoc = await getDoc(doc(db, 'users', user.uid));
-      const userInfo = userDoc.data();
-      
-      if (userInfo) {
-        setUserData(userInfo); // State update is async!
-        
-        // IMPORTANT: Use the userInfo variable directly here instead of userData state
-        const targetOrgId = viewingOrgId || userInfo.organizationId;
-        
-        if (userInfo.role === 'college_admin' || userInfo.role === 'super_admin') {
-          if (targetOrgId) {
-            await fetchAdminData(); 
-          }
-        } else {
-          toast.error('Access denied.');
-          navigate('/dashboard');
-        }
+  useEffect(() => {
+    const unsubscribe = onAuthStateChanged(auth, async (user) => {
+      if (!user) {
+        navigate('/auth');
+        return;
       }
-    } catch (error) {
-      console.error('Auth check error:', error);
-    } finally {
-      setLoading(false);
-    }
-  });
 
-  return () => unsubscribe();
-}, [navigate, viewingOrgId]);
+      try {
+        const userDoc = await getDoc(doc(db, 'users', user.uid));
+        const userInfo = userDoc.data();
+        setUserData(userInfo);
 
-const fetchAdminData = async () => {
-  // 1. Get the Org ID from either source
-  const targetOrgId = viewingOrgId || userData?.organizationId;
+        if (userInfo?.role !== 'college_admin' && userInfo?.role !== 'super_admin') {
+          toast.error('Access denied. Admin only.');
+          navigate('/dashboard');
+          return;
+        }
 
-  // 2. ABSOLUTE GUARD: If ID is missing, do not proceed.
+        await fetchAdminData();
+      } catch (error) {
+        console.error('Error fetching admin data:', error);
+        toast.error('Failed to load admin data');
+      } finally {
+        setLoading(false);
+      }
+    });
+
+    return () => unsubscribe();
+  }, [navigate, viewingOrgId]);
+
+  const fetchAdminData = async () => {
+  // 1. Determine the target ID safely
+  const targetOrgId = "pec";
+
+  // 2. GUARD: If we don't have an ID yet, stop here to prevent the Firebase crash
   if (!targetOrgId) {
-    console.log("Admin Dashboard: Waiting for organization ID...");
+    console.warn('fetchAdminData: targetOrgId is undefined. Waiting for data...');
     return;
   }
 
-  console.log("Admin Dashboard: Fetching data for Org:", targetOrgId);
-
   try {
-    // 3. Construct Queries with the verified ID
-    const coursesQuery = query(collection(db, 'courses'), where('organizationId', '==', targetOrgId));
-    const usersQuery = query(collection(db, 'users'), where('organizationId', '==', targetOrgId));
-    
-    // Safety check: Are feeRecords actually global or by Org? 
-    // Usually they should be by Org for a multi-tenant ERP.
-    const feeRecordsQuery = query(collection(db, 'feeRecords'), where('organizationId', '==', targetOrgId));
+    // 3. Define your collection references
+    const coursesRef = collection(db, 'courses');
+    const usersRef = collection(db, 'users');
+    const feesRef = collection(db, 'feeRecords');
 
-    const [coursesSnap, usersSnap, feeSnap] = await Promise.all([
+    // 4. Construct Queries (Safe now because targetOrgId is guaranteed)
+    const coursesQuery = query(coursesRef, where('organizationId', '==', targetOrgId));
+    const usersQuery = query(usersRef, where('organizationId', '==', targetOrgId));
+    
+    // Note: Usually feeRecords are also tied to an organizationId
+    const feesQuery = query(feesRef, where('organizationId', '==', targetOrgId));
+
+    // 5. Fetch all data concurrently for better performance
+    const [coursesSnapshot, usersSnapshot, feeSnapshot] = await Promise.all([
       getDocs(coursesQuery),
       getDocs(usersQuery),
-      getDocs(feeRecordsQuery)
+      getDocs(feesQuery)
     ]);
 
-    const coursesData = coursesSnap.docs.map(doc => ({ id: doc.id, ...doc.data() }));
-    const usersData = usersSnap.docs.map(doc => ({ id: doc.id, ...doc.data() }));
-    const feeData = feeSnap.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+    // 6. Map and Set State
+    const coursesData = coursesSnapshot.docs.map(doc => ({ id: doc.id, ...doc.data() } as any));
+    const usersData = usersSnapshot.docs.map(doc => ({ id: doc.id, ...doc.data() } as any));
+    const feeData = feeSnapshot.docs.map(doc => ({ id: doc.id, ...doc.data() } as any));
 
     setCourses(coursesData);
     setUsers(usersData);
     setFeeRecords(feeData);
 
-    // 4. Calculate Stats
-    const studentCount = usersData.filter((u: any) => u.role === 'student').length;
-    const facultyCount = usersData.filter((u: any) => u.role === 'faculty').length;
+    // 7. Calculate stats
+    const students = usersData.filter(u => u.role === 'student').length;
+    const faculty = usersData.filter(u => u.role === 'faculty').length;
     const revenue = feeData
-      .filter((f: any) => f.status === 'paid')
-      .reduce((sum, f: any) => sum + (Number(f.amount) || 0), 0);
+      .filter(f => f.status === 'paid')
+      .reduce((sum, f) => sum + (Number(f.amount) || 0), 0);
     
     setStats({
-      totalStudents: studentCount,
-      totalFaculty: facultyCount,
+      totalStudents: students,
+      totalFaculty: faculty,
       totalCourses: coursesData.length,
       totalRevenue: revenue,
     });
-
-  } catch (error: any) {
-    console.error('Firebase Fetch Error:', error);
-    // If you see "The query requires an index", follow the link in the console!
-    toast.error('Data sync failed. Check console for index link.');
+  } catch (error) {
+    console.error('Error in fetchAdminData:', error);
+    toast.error('Sync failed: Check your database indexes');
   }
 };
 
