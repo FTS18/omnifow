@@ -118,90 +118,97 @@ export function AdminDashboard({ viewingOrgId }: { viewingOrgId?: string }) {
 
   const isAdmin = userData?.role === 'college_admin' || userData?.role === 'super_admin';
 
-  useEffect(() => {
-    const unsubscribe = onAuthStateChanged(auth, async (user) => {
-      if (!user) {
-        navigate('/auth');
-        return;
-      }
+useEffect(() => {
+  const unsubscribe = onAuthStateChanged(auth, async (user) => {
+    if (!user) {
+      navigate('/auth');
+      return;
+    }
 
-      try {
-        const userDoc = await getDoc(doc(db, 'users', user.uid));
-        const userInfo = userDoc.data();
-        setUserData(userInfo);
-
-        if (userInfo?.role !== 'college_admin' && userInfo?.role !== 'super_admin') {
-          toast.error('Access denied. Admin only.');
+    try {
+      const userDoc = await getDoc(doc(db, 'users', user.uid));
+      const userInfo = userDoc.data();
+      
+      if (userInfo) {
+        setUserData(userInfo); // State update is async!
+        
+        // IMPORTANT: Use the userInfo variable directly here instead of userData state
+        const targetOrgId = viewingOrgId || userInfo.organizationId;
+        
+        if (userInfo.role === 'college_admin' || userInfo.role === 'super_admin') {
+          if (targetOrgId) {
+            await fetchAdminData(); 
+          }
+        } else {
+          toast.error('Access denied.');
           navigate('/dashboard');
-          return;
         }
-
-        await fetchAdminData();
-      } catch (error) {
-        console.error('Error fetching admin data:', error);
-        toast.error('Failed to load admin data');
-      } finally {
-        setLoading(false);
       }
+    } catch (error) {
+      console.error('Auth check error:', error);
+    } finally {
+      setLoading(false);
+    }
+  });
+
+  return () => unsubscribe();
+}, [navigate, viewingOrgId]);
+
+const fetchAdminData = async () => {
+  // 1. Get the Org ID from either source
+  const targetOrgId = viewingOrgId || userData?.organizationId;
+
+  // 2. ABSOLUTE GUARD: If ID is missing, do not proceed.
+  if (!targetOrgId) {
+    console.log("Admin Dashboard: Waiting for organization ID...");
+    return;
+  }
+
+  console.log("Admin Dashboard: Fetching data for Org:", targetOrgId);
+
+  try {
+    // 3. Construct Queries with the verified ID
+    const coursesQuery = query(collection(db, 'courses'), where('organizationId', '==', targetOrgId));
+    const usersQuery = query(collection(db, 'users'), where('organizationId', '==', targetOrgId));
+    
+    // Safety check: Are feeRecords actually global or by Org? 
+    // Usually they should be by Org for a multi-tenant ERP.
+    const feeRecordsQuery = query(collection(db, 'feeRecords'), where('organizationId', '==', targetOrgId));
+
+    const [coursesSnap, usersSnap, feeSnap] = await Promise.all([
+      getDocs(coursesQuery),
+      getDocs(usersQuery),
+      getDocs(feeRecordsQuery)
+    ]);
+
+    const coursesData = coursesSnap.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+    const usersData = usersSnap.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+    const feeData = feeSnap.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+
+    setCourses(coursesData);
+    setUsers(usersData);
+    setFeeRecords(feeData);
+
+    // 4. Calculate Stats
+    const studentCount = usersData.filter((u: any) => u.role === 'student').length;
+    const facultyCount = usersData.filter((u: any) => u.role === 'faculty').length;
+    const revenue = feeData
+      .filter((f: any) => f.status === 'paid')
+      .reduce((sum, f: any) => sum + (Number(f.amount) || 0), 0);
+    
+    setStats({
+      totalStudents: studentCount,
+      totalFaculty: facultyCount,
+      totalCourses: coursesData.length,
+      totalRevenue: revenue,
     });
 
-    return () => unsubscribe();
-  }, [navigate, viewingOrgId]);
-
-  const fetchAdminData = async () => {
-    try {
-      // Determine which organization's data to fetch
-      const targetOrgId = viewingOrgId || userData?.organizationId;
-
-      // if (!targetOrgId) {
-      //   toast.error('No organization selected');
-      //   return;
-      // }
-
-      // Fetch courses - filter by organization using Firestore query
-      const coursesQuery = query(
-        collection(db, 'courses'),
-        where('organizationId', '==', targetOrgId)
-      );
-      const coursesSnapshot = await getDocs(coursesQuery);
-      const coursesData = coursesSnapshot.docs.map(doc => ({ 
-        id: doc.id, 
-        ...doc.data() 
-      } as any));
-      setCourses(coursesData);
-
-      // Fetch users - filter by organization using Firestore query
-      const usersQuery = query(
-        collection(db, 'users'),
-        where('organizationId', '==', targetOrgId)
-      );
-      const usersSnapshot = await getDocs(usersQuery);
-      const usersData = usersSnapshot.docs.map(doc => ({ 
-        id: doc.id, 
-        ...doc.data() 
-      } as any));
-      setUsers(usersData);
-
-      // Fetch fee records
-      const feeSnapshot = await getDocs(collection(db, 'feeRecords'));
-      const feeData = feeSnapshot.docs.map(doc => ({ id: doc.id, ...doc.data() } as any));
-      setFeeRecords(feeData);
-
-      // Calculate stats
-      const students = (usersData as any[]).filter(u => u.role === 'student').length;
-      const faculty = (usersData as any[]).filter(u => u.role === 'faculty').length;
-      const revenue = (feeData as any[]).filter(f => f.status === 'paid').reduce((sum, f) => sum + (f.amount || 0), 0);
-      
-      setStats({
-        totalStudents: students,
-        totalFaculty: faculty,
-        totalCourses: coursesData.length,
-        totalRevenue: revenue,
-      });
-    } catch (error) {
-      console.error('Error fetching admin data:', error);
-    }
-  };
+  } catch (error: any) {
+    console.error('Firebase Fetch Error:', error);
+    // If you see "The query requires an index", follow the link in the console!
+    toast.error('Data sync failed. Check console for index link.');
+  }
+};
 
   // Course CRUD
   const handleCreateCourse = async () => {
